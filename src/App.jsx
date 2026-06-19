@@ -126,6 +126,7 @@ const PRIZES = [
 ];
 
 const sanitize = (n) => n.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 40);
+const authEmailFor = (playerKey) => `${playerKey}@worldcup-pool.com`;
 
 /* ── Supabase shared storage adapter ─────────────────────────
    Shared values go to Supabase table public.wc_store.
@@ -360,6 +361,8 @@ export default function App() {
   const [admin, setAdmin] = useState(false);
   const [toast, setToast] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loginPassword, setLoginPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
 
   const pop = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2200); };
 
@@ -407,41 +410,93 @@ export default function App() {
     (async () => {
       const dev = await getDeviceId();
       setDeviceId(dev);
-      const saved = await sget("wc:me", false);
       const cl = (await sget("wc:claims")) || {};
       setClaims(cl);
-      // only stay logged in if this device still owns the claim for that player
-      if (saved && cl[saved.key] === dev) {
-        setMe(saved);
-      } else if (saved) {
-        // claim was released by the commissioner, or taken by another device → sign out here
-        await sset("wc:me", null, false);
-        setMe(null);
+
+      // Password login uses Supabase Auth. The session is stored by Supabase,
+      // so refreshing the page keeps the user signed in without relying on the
+      // old device-claim system.
+      if (supabase) {
+        const { data } = await supabase.auth.getSession();
+        const u = data?.session?.user;
+        const key = u?.user_metadata?.player_key;
+        if (key) {
+          setMe({ key, name: u.user_metadata?.display_name || key });
+        }
+      } else {
+        // Fallback for local/offline testing only.
+        const saved = await sget("wc:me", false);
+        if (saved) setMe(saved);
       }
+
       const adminOk = await sget("wc:adminok", false);
       if (adminOk) setAdmin(true);
       await loadAll();
     })();
   }, [loadAll]);
 
-  /* claim a player on this device — sign in instantly, persist in background */
+  /* password login/signup for a player */
   async function selectUser(key, name) {
-    if (claims[key] && claims[key] !== deviceId) {
-      pop("That name is in use — ask the commissioner to release it");
+    const password = loginPassword.trim();
+    if (!password || password.length < 4) {
+      pop("Enter a password first — minimum 4 characters");
       return;
     }
-    const dev = deviceId || await getDeviceId();
-    if (!deviceId) setDeviceId(dev);
-    setMe({ key, name });                     // in immediately; don't block on flaky writes
-    setClaims(c => ({ ...c, [key]: dev }));
-    sset("wc:me", { key, name }, false);
-    sset("wc:claims", { ...claims, [key]: dev }).then(ok => {
-      if (!ok) pop("⚠ Signed in, but storage is unreliable right now");
-    });
-    loadAll();
+
+    // If Supabase is not connected, keep a simple local fallback for testing.
+    if (!supabase) {
+      setMe({ key, name });
+      await sset("wc:me", { key, name }, false);
+      setLoginPassword("");
+      await loadAll();
+      return;
+    }
+
+    setAuthBusy(true);
+    const email = authEmailFor(key);
+    try {
+      // Existing user: sign in with password.
+      let { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+      if (error) {
+        // First time for this player: create the account with this password.
+        const signup = await supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { player_key: key, display_name: name } },
+        });
+
+        if (signup.error) {
+          const msg = String(signup.error.message || "");
+          if (msg.toLowerCase().includes("already") || msg.toLowerCase().includes("registered")) {
+            pop("Wrong password for this user");
+          } else {
+            pop(`Login failed: ${msg}`);
+          }
+          setAuthBusy(false);
+          return;
+        }
+        data = signup.data;
+      }
+
+      const u = data?.session?.user || data?.user;
+      if (!u) {
+        pop("Account created, but Supabase email confirmation is on. Turn it off in Auth settings.");
+        setAuthBusy(false);
+        return;
+      }
+
+      setMe({ key, name });
+      setLoginPassword("");
+      await sset("wc:me", { key, name }, false);
+      await loadAll();
+    } catch (err) {
+      pop(`Login failed: ${err?.message || err}`);
+    }
+    setAuthBusy(false);
   }
 
-  /* add a brand-new player (for someone not on the list), then claim it */
+  /* add a brand-new player (for someone not on the list), then create/login */
   async function addNewPlayer() {
     const display = nameInput.trim();
     if (!display) return;
@@ -459,11 +514,8 @@ export default function App() {
 
   /* sign out on this device and free the claim so it can be re-selected */
   async function signOut() {
-    if (me) {
-      const fresh = (await sget("wc:claims")) || {};
-      if (fresh[me.key] === deviceId) { const n = { ...fresh }; delete n[me.key]; await sset("wc:claims", n); setClaims(n); }
-      await sset("wc:me", null, false);
-    }
+    if (supabase) await supabase.auth.signOut().catch(() => {});
+    await sset("wc:me", null, false);
     setMe(null);
   }
 
@@ -504,24 +556,25 @@ export default function App() {
         <div className="gate"><div className="card gateCard">
           <div className="kick">Office Pool · 2026</div>
           <h1>World Cup <em>Prediction League</em></h1>
-          <p className="sub" style={{ margin: "10px 0 16px" }}>Select your name to enter. You only do this once on this device.</p>
+          <p className="sub" style={{ margin: "10px 0 16px" }}>Enter your password, then select your name. First time creates that user's password.</p>
+
+          <input className="fld" type="password" placeholder="Password" value={loginPassword}
+            onChange={e => setLoginPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && roster.length === 1 && selectUser(roster[0], names[roster[0]] || roster[0])} />
+          <p className="muted" style={{ margin: "8px 0 14px" }}>Use the same password every time. Minimum 4 characters.</p>
 
           {loading && !roster.length && <p className="muted">Loading players…</p>}
 
           {roster.length > 0 && (
             <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
-              {roster.map(k => {
-                const taken = claims[k] && claims[k] !== deviceId;
-                return (
-                  <button key={k} className={`btn ${taken ? "ghost" : ""}`}
-                    disabled={taken}
-                    style={{ width: "100%", opacity: taken ? 0.5 : 1, display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                    onClick={() => selectUser(k, names[k] || k)}>
-                    <span>{names[k] || k}</span>
-                    {taken && <span style={{ fontSize: 11, letterSpacing: ".1em" }}>IN USE</span>}
-                  </button>
-                );
-              })}
+              {roster.map(k => (
+                <button key={k} className="btn"
+                  disabled={authBusy || !loginPassword.trim()}
+                  style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                  onClick={() => selectUser(k, names[k] || k)}>
+                  <span>{names[k] || k}</span>
+                  <span style={{ fontSize: 11, letterSpacing: ".1em" }}>{authBusy ? "WAIT" : "LOGIN"}</span>
+                </button>
+              ))}
             </div>
           )}
 
@@ -531,12 +584,12 @@ export default function App() {
                 <input className="fld" placeholder="Type your name" value={nameInput}
                   onChange={e => setNameInput(e.target.value)} onKeyDown={e => e.key === "Enter" && addNewPlayer()} />
                 <div className="predRow" style={{ marginTop: 10 }}>
-                  <button className="btn" disabled={!nameInput.trim()} onClick={addNewPlayer}>Add & enter</button>
+                  <button className="btn" disabled={!nameInput.trim() || !loginPassword.trim() || authBusy} onClick={addNewPlayer}>Add & enter</button>
                   <button className="btn ghost" onClick={() => { setAddingNew(false); setNameInput(""); }}>Cancel</button>
                 </div>
               </div>}
 
-          <p className="muted" style={{ marginTop: 14 }}>Picked the wrong name? The commissioner can release it from the Commissioner tab.</p>
+          <p className="muted" style={{ marginTop: 14 }}>If this is your first time, your password will be created. After that, use the same password to enter from any device.</p>
         </div></div>
       </div>
     );
