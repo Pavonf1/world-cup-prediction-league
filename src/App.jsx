@@ -304,6 +304,7 @@ h1 em{font-style:normal;color:var(--gold)}
 .badge.open{color:var(--ok);border-color:var(--ok)}
 .badge.locked{color:var(--signal);border-color:var(--signal)}
 .badge.final{color:var(--gold);border-color:var(--gold)}
+.badge.live{color:#fff;border-color:#fff;background:rgba(255,255,255,.08)}
 .board{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;text-align:center;
   background:rgba(0,0,0,.35);border-radius:10px;padding:14px 10px;border:1px solid var(--line)}
 .team{font-family:'Bebas Neue',sans-serif;font-size:clamp(20px,4vw,28px);letter-spacing:.04em}
@@ -434,7 +435,12 @@ export default function App() {
       await loadAll();
     })();
   }, [loadAll]);
-
+  // Keep scores/picks fresh after the Cloudflare Worker updates Supabase.
+  useEffect(() => {
+    if (!me) return;
+    const id = setInterval(() => loadAll(), 60000);
+    return () => clearInterval(id);
+  }, [me, loadAll]);
   /* password login/signup for a player */
   async function selectUser(key, name) {
     const password = loginPassword.trim();
@@ -691,9 +697,10 @@ function MatchCard({ m, me, allPreds, names, onSave }) {
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
   const finished = m.sh != null;
+  const liveScore = !finished && m.live && m.live.sh != null && m.live.sa != null;
   const started = !finished && matchStarted(m);
-  const status = finished ? "final" : started ? "locked" : "open";
-  const reveal = finished || started;
+  const status = finished ? "final" : liveScore ? "live" : started ? "locked" : "open";
+  const reveal = finished || started || liveScore;
 
   async function doSave() {
     setSaving(true); setFailed(false);
@@ -705,13 +712,24 @@ function MatchCard({ m, me, allPreds, names, onSave }) {
     <div className="card">
       <div className="matchTop">
         <span className="mdate">{m.g ? `Group ${m.g} · ` : ""}{m.date || "TBD"}</span>
-        <span className={`badge ${status}`}>{status === "final" ? "FULL TIME" : status === "locked" ? "LOCKED" : "OPEN"}</span>
+        <span className={`badge ${status}`}>
+          {status === "final" ? "FULL TIME" : status === "live" ? "LIVE" : status === "locked" ? "LOCKED" : "OPEN"}
+        </span>
       </div>
+
       <div className="board">
         <div className="team">{m.home}</div>
-        <div className="scoreBox">{finished ? `${m.sh} – ${m.sa}` : "VS"}</div>
+        <div className="scoreBox">
+          {finished ? `${m.sh} – ${m.sa}` : liveScore ? `${m.live.sh} – ${m.live.sa}` : "VS"}
+        </div>
         <div className="team">{m.away}</div>
       </div>
+
+      {liveScore && (
+        <p className="muted" style={{ marginTop: 8, textAlign: "center" }}>
+          Live score from feed. Points calculate only after full time.
+        </p>
+      )}
 
       {!reveal && (
         <div className="predRow">
@@ -726,7 +744,12 @@ function MatchCard({ m, me, allPreds, names, onSave }) {
           {!saving && failed && <span style={{ color: "var(--signal)" }}>✗ Not saved — try again</span>}
         </div>
       )}
-      {!reveal && <p className="muted" style={{ marginTop: 8 }}>Picks close automatically at kickoff. Everyone's picks stay hidden until then. After kickoff, only the commissioner can change a pick.</p>}
+
+      {!reveal && (
+        <p className="muted" style={{ marginTop: 8 }}>
+          Picks close automatically at kickoff. Everyone's picks stay hidden until then. After kickoff, only the commissioner can change a pick.
+        </p>
+      )}
 
       {reveal && (
         <div className="picks">
@@ -736,7 +759,8 @@ function MatchCard({ m, me, allPreds, names, onSave }) {
             return (
               <div className="pickLine" key={pk}>
                 <span>{names[pk] || pk}{pk === me.key ? " (you)" : ""}</span>
-                <span>{p ? `${p.h}–${p.a}` : <span className="muted">no pick</span>}
+                <span>
+                  {p ? `${p.h}–${p.a}` : <span className="muted">no pick</span>}
                   {finished && p != null && <span className="pts">  +{pts}</span>}
                 </span>
               </div>
