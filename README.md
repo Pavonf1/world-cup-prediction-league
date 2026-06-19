@@ -12,3 +12,4 @@ Cloudflare Pages build settings:
   - VITE_SUPABASE_ANON_KEY
 
 Do not put the Supabase service_role key in this project. Use only the anon/public/publishable key.
+Deployment refresh
